@@ -1,0 +1,14 @@
+services:
+  # Web service (Django API)
+  - type: web
+    name: code2text-api
+    env: python
+    buildCommand: cd code2text_api && pip install -r ../requirements.txt
+    startCommand: cd code2text_api && gunicorn code2text.wsgi:application
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.0
+      - key: DEBUG
+        value: False
+      - key: MONGODB_URI
+        sync: false 
