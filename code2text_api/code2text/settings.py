@@ -19,7 +19,7 @@ SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-key-for-development-o
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DEBUG', 'True') == 'True'
 
-ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
+ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'code-to-text-software-backend.onrender.com').split(',')
 
 # Application definition
 
@@ -162,7 +162,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # CORS settings
 CORS_ALLOW_ALL_ORIGINS = DEBUG
-CORS_ALLOWED_ORIGINS = os.environ.get('CORS_ALLOWED_ORIGINS', 'http://localhost:3000').split(',')
+CORS_ALLOWED_ORIGINS = os.environ.get('CORS_ALLOWED_ORIGINS', 'http://localhost:3000,https://code-to-text-software.vercel.app').split(',')
 
 # GitHub API settings
 GITHUB_CLIENT_ID = os.environ.get('GITHUB_CLIENT_ID')
