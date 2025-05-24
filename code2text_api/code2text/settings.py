@@ -193,6 +193,20 @@ if STORAGE_TYPE == 's3':
     AWS_S3_REGION_NAME = os.environ.get('S3_REGION')
     AWS_QUERYSTRING_AUTH = True
     AWS_S3_FILE_OVERWRITE = False
+elif STORAGE_TYPE == 'supabase':
+    # Supabase Storage settings (using S3 compatible API)
+    DEFAULT_FILE_STORAGE = 'storages.backends.s3boto3.S3Boto3Storage'
+    AWS_ACCESS_KEY_ID = os.environ.get('SUPABASE_ACCESS_KEY')
+    AWS_SECRET_ACCESS_KEY = os.environ.get('SUPABASE_SECRET_KEY')
+    AWS_STORAGE_BUCKET_NAME = os.environ.get('SUPABASE_BUCKET')
+    AWS_S3_ENDPOINT_URL = os.environ.get('SUPABASE_URL')
+    AWS_S3_CUSTOM_DOMAIN = os.environ.get('SUPABASE_CUSTOM_DOMAIN')
+    AWS_DEFAULT_ACL = 'public-read'
+    AWS_QUERYSTRING_AUTH = False
+    AWS_S3_FILE_OVERWRITE = False
+    # Additional Supabase specific settings
+    AWS_S3_ADDRESSING_STYLE = 'virtual'
+    AWS_S3_SIGNATURE_VERSION = 's3v4'
 
 # Celery settings
 CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', 'redis://localhost:6379/0')

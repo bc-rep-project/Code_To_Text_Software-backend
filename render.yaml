@@ -11,4 +11,15 @@ services:
       - key: DEBUG
         value: False
       - key: MONGODB_URI
+        sync: false
+      # Storage configuration
+      - key: STORAGE_TYPE
+        value: supabase
+      - key: SUPABASE_ACCESS_KEY
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+      - key: SUPABASE_BUCKET
+        value: code2text-files
+      - key: SUPABASE_URL
         sync: false 
