@@ -60,6 +60,9 @@ coverage.xml
 # */migrations/*.py
 # !*/migrations/__init__.py
 
+RENDER_DEPLOYMENT_GUIDE.md
+RENDER_SERVICES_SETUP.md
+DEPLOYMENT_SUMMARY.md
 test_storage.py
 
 # Environments
