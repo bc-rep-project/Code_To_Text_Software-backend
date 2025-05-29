@@ -12,6 +12,7 @@ google-auth-oauthlib==1.1.0
 google-api-python-client==2.112.0
 paypalrestsdk==1.13.1
 gunicorn==21.2.0
+PyJWT==2.8.0
 django-storages==1.14.2
 boto3==1.28.64
 dj-database-url==2.1.0
