@@ -31,7 +31,23 @@ SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'django-insecure-change-this-in
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DJANGO_DEBUG', 'True').lower() == 'true'
 
+# ALLOWED_HOSTS configuration with proper Render support
 ALLOWED_HOSTS = os.environ.get('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
+
+# Add support for RENDER_EXTERNAL_HOSTNAME environment variable
+RENDER_EXTERNAL_HOSTNAME = os.environ.get('RENDER_EXTERNAL_HOSTNAME')
+if RENDER_EXTERNAL_HOSTNAME:
+    ALLOWED_HOSTS.append(RENDER_EXTERNAL_HOSTNAME)
+
+# Also ensure the specific Render URL is included
+if 'code-to-text-software-backend.onrender.com' not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append('code-to-text-software-backend.onrender.com')
+
+# Debug logging for deployment troubleshooting (remove after fixing)
+print(f"DEBUG setting is: {DEBUG}")
+print(f"ALLOWED_HOSTS is currently: {ALLOWED_HOSTS}")
+print(f"RENDER_EXTERNAL_HOSTNAME from env is: {RENDER_EXTERNAL_HOSTNAME}")
+print(f"DJANGO_ALLOWED_HOSTS from env is: {os.environ.get('DJANGO_ALLOWED_HOSTS')}")
 
 
 # Application definition

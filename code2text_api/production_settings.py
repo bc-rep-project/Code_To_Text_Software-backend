@@ -9,12 +9,22 @@ import os
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = False
 
-# Production allowed hosts
+# Production allowed hosts - Updated with correct URL and environment variable support
 ALLOWED_HOSTS = [
-    'code2text-api.onrender.com',  # Replace with your actual Render.com URL
+    'code-to-text-software-backend.onrender.com',  # Correct Render.com URL
     'localhost',
     '127.0.0.1',
 ]
+
+# Add support for RENDER_EXTERNAL_HOSTNAME environment variable
+RENDER_EXTERNAL_HOSTNAME = os.environ.get('RENDER_EXTERNAL_HOSTNAME')
+if RENDER_EXTERNAL_HOSTNAME:
+    ALLOWED_HOSTS.append(RENDER_EXTERNAL_HOSTNAME)
+
+# Debug logging for deployment troubleshooting (remove after fixing)
+print(f"DEBUG setting is: {DEBUG}")
+print(f"ALLOWED_HOSTS is currently: {ALLOWED_HOSTS}")
+print(f"RENDER_EXTERNAL_HOSTNAME from env is: {RENDER_EXTERNAL_HOSTNAME}")
 
 # Add your frontend domain to CORS allowed origins
 CORS_ALLOWED_ORIGINS = [
