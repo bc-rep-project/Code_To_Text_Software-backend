@@ -28,9 +28,24 @@ print(f"RENDER_EXTERNAL_HOSTNAME from env is: {RENDER_EXTERNAL_HOSTNAME}")
 
 # Add your frontend domain to CORS allowed origins
 CORS_ALLOWED_ORIGINS = [
-    "https://your-frontend-domain.vercel.app",  # Replace with your actual frontend URL
-    "https://code-to-text-software.vercel.app",
+    "https://code-to-text-software-frontend.vercel.app",  # Correct frontend URL
     "http://localhost:3000",  # For local development
+]
+
+# Ensure CORS credentials are allowed
+CORS_ALLOW_CREDENTIALS = True
+
+# Additional CORS headers for API requests
+CORS_ALLOW_HEADERS = [
+    'accept',
+    'accept-encoding',
+    'authorization',
+    'content-type',
+    'dnt',
+    'origin',
+    'user-agent',
+    'x-csrftoken',
+    'x-requested-with',
 ]
 
 # Database configuration for production
