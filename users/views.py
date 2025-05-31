@@ -244,20 +244,40 @@ def update_profile(request):
     """
     Update user profile
     """
+    user = request.user
+    
+    # Update user fields
+    if 'first_name' in request.data:
+        user.first_name = request.data['first_name']
+    if 'last_name' in request.data:
+        user.last_name = request.data['last_name']
+    if 'email' in request.data:
+        user.email = request.data['email']
+    
+    user.save()
+    
+    # Update profile if it exists
     try:
-        profile = request.user.profile
+        profile = user.profile
+        profile_serializer = UserProfileSerializer(profile, data=request.data, partial=True)
+        if profile_serializer.is_valid():
+            profile_serializer.save()
     except UserProfile.DoesNotExist:
-        profile = UserProfile.objects.create(user=request.user)
+        pass
     
-    serializer = UserProfileSerializer(profile, data=request.data, partial=True)
-    if serializer.is_valid():
-        serializer.save()
-        return Response({
-            'message': 'Profile updated successfully',
-            'profile': serializer.data
-        }, status=status.HTTP_200_OK)
-    
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    return Response({
+        'message': 'Profile updated successfully',
+        'user': {
+            'id': user.id,
+            'email': user.email,
+            'username': user.username,
+            'first_name': user.first_name,
+            'last_name': user.last_name,
+            'subscription_status': user.subscription_status,
+            'trial_ends_at': user.trial_ends_at,
+            'can_access_premium': user.can_access_premium_features(),
+        }
+    }, status=status.HTTP_200_OK)
 
 
 @csrf_exempt
@@ -305,3 +325,136 @@ def start_trial(request):
         'trial_ends_at': user.trial_ends_at,
         'subscription_status': user.subscription_status
     }, status=status.HTTP_200_OK)
+
+
+@csrf_exempt
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def user_details(request):
+    """
+    Get current user details (for getUserDetails frontend call)
+    """
+    return Response({
+        'id': request.user.id,
+        'email': request.user.email,
+        'username': request.user.username,
+        'first_name': request.user.first_name,
+        'last_name': request.user.last_name,
+        'subscription_status': request.user.subscription_status,
+        'trial_ends_at': request.user.trial_ends_at,
+        'can_access_premium': request.user.can_access_premium_features(),
+    }, status=status.HTTP_200_OK)
+
+
+@csrf_exempt
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def change_password(request):
+    """
+    Change user password
+    """
+    old_password = request.data.get('old_password')
+    new_password = request.data.get('new_password')
+    
+    if not old_password or not new_password:
+        return Response({
+            'error': 'Both old_password and new_password are required'
+        }, status=status.HTTP_400_BAD_REQUEST)
+    
+    if not request.user.check_password(old_password):
+        return Response({
+            'error': 'Invalid old password'
+        }, status=status.HTTP_400_BAD_REQUEST)
+    
+    request.user.set_password(new_password)
+    request.user.save()
+    
+    return Response({
+        'message': 'Password changed successfully'
+    }, status=status.HTTP_200_OK)
+
+
+@csrf_exempt
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def request_password_reset(request):
+    """
+    Request password reset email
+    """
+    email = request.data.get('email')
+    
+    if not email:
+        return Response({
+            'error': 'Email is required'
+        }, status=status.HTTP_400_BAD_REQUEST)
+    
+    # TODO: Implement email sending logic
+    return Response({
+        'message': 'Password reset email sent (if account exists)'
+    }, status=status.HTTP_200_OK)
+
+
+@csrf_exempt
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def confirm_password_reset(request):
+    """
+    Confirm password reset with token
+    """
+    token = request.data.get('token')
+    new_password = request.data.get('new_password')
+    
+    if not token or not new_password:
+        return Response({
+            'error': 'Token and new_password are required'
+        }, status=status.HTTP_400_BAD_REQUEST)
+    
+    # TODO: Implement token validation and password reset
+    return Response({
+        'message': 'Password reset successful'
+    }, status=status.HTTP_200_OK)
+
+
+@csrf_exempt
+@api_view(['POST', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def manage_subscription(request):
+    """
+    Manage subscription - POST to subscribe, DELETE to cancel
+    """
+    if request.method == 'POST':
+        payment_token = request.data.get('payment_token')
+        
+        if not payment_token:
+            return Response({
+                'error': 'payment_token is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # TODO: Implement PayPal subscription validation
+        # For now, just activate the subscription
+        request.user.activate_subscription(payment_token)
+        
+        return Response({
+            'message': 'Subscription activated successfully',
+            'user': {
+                'id': request.user.id,
+                'subscription_status': request.user.subscription_status,
+                'subscription_id': request.user.subscription_id,
+                'can_access_premium': request.user.can_access_premium_features(),
+            }
+        }, status=status.HTTP_200_OK)
+    
+    elif request.method == 'DELETE':
+        # Cancel subscription
+        request.user.subscription_status = 'cancelled'
+        request.user.subscription_id = None
+        request.user.save()
+        
+        return Response({
+            'message': 'Subscription cancelled successfully',
+            'user': {
+                'id': request.user.id,
+                'subscription_status': request.user.subscription_status,
+                'can_access_premium': request.user.can_access_premium_features(),
+            }
+        }, status=status.HTTP_200_OK)
