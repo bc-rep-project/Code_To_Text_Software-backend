@@ -17,11 +17,14 @@ from urllib.parse import urlparse
 import requests
 from datetime import datetime, timedelta
 from django.utils import timezone
+import logging
 
 from .models import Project, ScanData, GitHubInfo, ConversionResult, ProjectMonitoring
 from .serializers import ProjectSerializer, ProjectDetailSerializer
 
 # Create your views here.
+
+logger = logging.getLogger(__name__)
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
@@ -198,12 +201,17 @@ def scan_project(request, project_id):
             'error': f'Project cannot be scanned in current status: {project.status}'
         }, status=status.HTTP_400_BAD_REQUEST)
     
-    # For GitHub projects, check if URL is accessible
+    # For GitHub projects, validate and check accessibility
     if project.source_type == 'github':
-        if not _validate_github_repo_access(project.github_repo_url):
+        validation_result = _validate_github_repo_access_detailed(project.github_repo_url)
+        if not validation_result['success']:
+            logger.warning(f"GitHub repo validation failed for {project.github_repo_url}: {validation_result['error']}")
             return Response({
-                'error': 'GitHub repository is not accessible or does not exist'
+                'error': validation_result['error']
             }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Log successful validation
+        logger.info(f"GitHub repo validation successful for {project.github_repo_url}")
     
     # For upload projects, check if file exists
     elif project.source_type == 'upload':
@@ -225,6 +233,7 @@ def scan_project(request, project_id):
             'project_status': project.status
         }, status=status.HTTP_200_OK)
     except Exception as e:
+        logger.error(f"Scan failed for project {project_id}: {str(e)}", exc_info=True)
         project.status = 'error'
         project.save()
         return Response({
@@ -400,20 +409,106 @@ def _is_valid_github_url(url):
         return False
 
 
-def _validate_github_repo_access(url):
-    """Check if GitHub repository is accessible"""
+def _validate_github_repo_access_detailed(url):
+    """
+    Check if GitHub repository is accessible with detailed error reporting
+    """
     try:
+        # First validate URL format
+        if not _is_valid_github_url(url):
+            return {
+                'success': False,
+                'error': 'Invalid GitHub URL format. Please provide a valid GitHub repository URL (e.g., https://github.com/username/repository)'
+            }
+        
         # Convert to API URL
         parsed = urlparse(url)
         path_parts = parsed.path.strip('/').split('/')
         owner, repo = path_parts[0], path_parts[1]
         
         api_url = f"https://api.github.com/repos/{owner}/{repo}"
-        response = requests.get(api_url, timeout=10)
+        logger.info(f"Checking GitHub API access for: {api_url}")
         
-        return response.status_code == 200
-    except:
-        return False
+        # Make request with longer timeout and proper headers
+        headers = {
+            'User-Agent': 'CodeToTextSoftware/1.0',
+            'Accept': 'application/vnd.github.v3+json'
+        }
+        
+        # Add GitHub token if available (for higher rate limits and private repos)
+        github_token = os.environ.get('GITHUB_TOKEN')
+        if github_token:
+            headers['Authorization'] = f'token {github_token}'
+            logger.info("Using GitHub token for API access")
+        else:
+            logger.warning("No GitHub token found - using unauthenticated requests (lower rate limits)")
+        
+        response = requests.get(api_url, headers=headers, timeout=15)
+        
+        logger.info(f"GitHub API response status: {response.status_code}")
+        
+        if response.status_code == 200:
+            repo_data = response.json()
+            # Check if repository is empty
+            if repo_data.get('size', 0) == 0:
+                logger.warning(f"Repository {owner}/{repo} appears to be empty")
+            
+            return {
+                'success': True,
+                'data': {
+                    'owner': owner,
+                    'repo': repo,
+                    'private': repo_data.get('private', False),
+                    'size': repo_data.get('size', 0),
+                    'default_branch': repo_data.get('default_branch', 'main')
+                }
+            }
+        elif response.status_code == 404:
+            return {
+                'success': False,
+                'error': f'GitHub repository "{owner}/{repo}" not found or is private and requires authentication'
+            }
+        elif response.status_code == 403:
+            # Check if it's rate limiting
+            if 'rate limit' in response.text.lower():
+                return {
+                    'success': False,
+                    'error': 'GitHub API rate limit exceeded. Please try again later or configure a GitHub token for higher limits'
+                }
+            else:
+                return {
+                    'success': False,
+                    'error': 'Access forbidden. Repository might be private or requires different permissions'
+                }
+        else:
+            return {
+                'success': False,
+                'error': f'GitHub API returned status {response.status_code}. Please check if the repository exists and is accessible'
+            }
+            
+    except requests.exceptions.Timeout:
+        logger.error(f"Timeout while checking GitHub repository: {url}")
+        return {
+            'success': False,
+            'error': 'Timeout while checking GitHub repository. Please try again or check your internet connection'
+        }
+    except requests.exceptions.ConnectionError:
+        logger.error(f"Connection error while checking GitHub repository: {url}")
+        return {
+            'success': False,
+            'error': 'Unable to connect to GitHub. Please check your internet connection and try again'
+        }
+    except Exception as e:
+        logger.error(f"Unexpected error while validating GitHub repo {url}: {str(e)}", exc_info=True)
+        return {
+            'success': False,
+            'error': f'Unexpected error while checking repository: {str(e)}'
+        }
+
+def _validate_github_repo_access(url):
+    """Check if GitHub repository is accessible (legacy function for backward compatibility)"""
+    result = _validate_github_repo_access_detailed(url)
+    return result['success']
 
 
 def _perform_mock_scan(project):
