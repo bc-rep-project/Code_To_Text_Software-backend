@@ -1,30 +1,32 @@
-from django.shortcuts import render, get_object_or_404
-from django.http import HttpResponse, Http404
-from django.core.files.storage import default_storage
-from django.core.files.base import ContentFile
-from django.conf import settings
-from rest_framework.decorators import api_view, permission_classes, parser_classes
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
-from rest_framework import status
-from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 import os
 import json
-import zipfile
-import tempfile
 import shutil
-from urllib.parse import urlparse
+import tempfile
+import zipfile
 import requests
-from datetime import datetime, timedelta
-from django.utils import timezone
 import logging
+from urllib.parse import urlparse
+from django.utils import timezone
+from django.http import HttpResponse, JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.contrib.auth.decorators import login_required
+from django.core.files.storage import default_storage
+from django.core.files.base import ContentFile
+from rest_framework import status
+from rest_framework.decorators import api_view, permission_classes, parser_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.response import Response
+
+# Add the import for our conversion utils
+from .conversion_utils import perform_codebase_conversion
 
 from .models import Project, ScanData, GitHubInfo, ConversionResult, ProjectMonitoring
-from .serializers import ProjectSerializer, ProjectDetailSerializer
-
-# Create your views here.
+from .serializers import ProjectSerializer, ScanDataSerializer
 
 logger = logging.getLogger(__name__)
+
+# Create your views here.
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
@@ -111,7 +113,7 @@ def project_detail(request, project_id):
             'error': 'Project not found'
         }, status=status.HTTP_404_NOT_FOUND)
     
-    serializer = ProjectDetailSerializer(project)
+    serializer = ProjectSerializer(project)
     return Response({
         'project': serializer.data
     }, status=status.HTTP_200_OK)
@@ -267,7 +269,7 @@ def convert_project(request, project_id):
     # Here you would typically trigger an async task to perform the actual conversion
     # For now, we'll simulate a quick conversion
     try:
-        _perform_mock_conversion(project)
+        _perform_real_conversion(project)
         return Response({
             'message': 'Conversion completed successfully',
             'project_status': project.status
@@ -596,6 +598,187 @@ def _perform_mock_conversion(project):
     project.status = 'converted'
     project.last_conversion_at = timezone.now()
     project.save()
+
+
+def _perform_real_conversion(project):
+    """Perform the actual conversion of the project"""
+    try:
+        # Determine source directory based on project type
+        if project.source_type == 'github':
+            # For GitHub projects, we'll need to clone the repository first
+            source_directory = _clone_github_repository(project)
+            if not source_directory:
+                raise Exception("Failed to clone GitHub repository")
+        else:
+            # For uploaded projects, extract the ZIP file to a temporary directory
+            source_directory = _extract_uploaded_file(project)
+            if not source_directory:
+                raise Exception("Failed to extract uploaded file")
+        
+        # Perform the actual conversion
+        conversion_result = perform_codebase_conversion(project, source_directory)
+        
+        if not conversion_result['success']:
+            raise Exception(conversion_result.get('error', 'Unknown conversion error'))
+        
+        # Get conversion statistics
+        stats = conversion_result['stats']
+        zip_path = conversion_result['zip_path']
+        
+        # Create or update conversion result in database
+        db_conversion_result, created = ConversionResult.objects.get_or_create(
+            project=project,
+            defaults={
+                'converted_artifact_path': zip_path,
+                'total_files_converted': stats.get('files_converted', 0),
+                'conversion_size_bytes': os.path.getsize(zip_path),
+                'conversion_duration_seconds': stats.get('conversion_duration_seconds', 0)
+            }
+        )
+        
+        if not created:
+            # Remove old file if exists
+            if db_conversion_result.converted_artifact_path and os.path.exists(db_conversion_result.converted_artifact_path):
+                os.remove(db_conversion_result.converted_artifact_path)
+            
+            # Update with new conversion data
+            db_conversion_result.converted_artifact_path = zip_path
+            db_conversion_result.total_files_converted = stats.get('files_converted', 0)
+            db_conversion_result.conversion_size_bytes = os.path.getsize(zip_path)
+            db_conversion_result.conversion_duration_seconds = stats.get('conversion_duration_seconds', 0)
+            db_conversion_result.save()
+        
+        # Clean up temporary source directory
+        if source_directory:
+            try:
+                shutil.rmtree(source_directory, ignore_errors=True)
+            except Exception as e:
+                logger.warning(f"Failed to cleanup temporary directory {source_directory}: {e}")
+        
+        # Update project status
+        project.status = 'converted'
+        project.last_conversion_at = timezone.now()
+        project.save()
+        
+        logger.info(f"Successfully converted project {project.id}: {stats.get('files_converted', 0)} files converted")
+        
+    except Exception as e:
+        logger.error(f"Conversion failed for project {project.id}: {str(e)}")
+        project.status = 'error'
+        project.save()
+        raise
+
+
+def _extract_uploaded_file(project):
+    """Extract uploaded ZIP file to a temporary directory"""
+    try:
+        # Check if the uploaded file exists
+        if not project.uploaded_file_key or not default_storage.exists(project.uploaded_file_key):
+            logger.error(f"Uploaded file not found for project {project.id}: {project.uploaded_file_key}")
+            return None
+        
+        # Create temporary directory
+        temp_dir = tempfile.mkdtemp(prefix=f"upload_{project.id}_")
+        extract_dir = os.path.join(temp_dir, "extracted")
+        os.makedirs(extract_dir, exist_ok=True)
+        
+        logger.info(f"Extracting uploaded file {project.uploaded_file_key} to {extract_dir}")
+        
+        # Read the uploaded file from storage
+        with default_storage.open(project.uploaded_file_key, 'rb') as f:
+            file_content = f.read()
+        
+        # Save to temporary location for extraction
+        temp_zip_path = os.path.join(temp_dir, project.original_file_name or "upload.zip")
+        with open(temp_zip_path, 'wb') as f:
+            f.write(file_content)
+        
+        # Extract the ZIP file
+        try:
+            with zipfile.ZipFile(temp_zip_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_dir)
+            
+            # Remove the temporary ZIP file
+            os.remove(temp_zip_path)
+            
+            # Verify extraction was successful
+            if not os.listdir(extract_dir):
+                logger.error(f"Extracted directory is empty for project {project.id}")
+                return None
+            
+            logger.info(f"Successfully extracted uploaded file to {extract_dir}")
+            return extract_dir
+            
+        except zipfile.BadZipFile:
+            logger.error(f"Invalid ZIP file for project {project.id}: {project.uploaded_file_key}")
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting ZIP file for project {project.id}: {str(e)}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error extracting uploaded file for project {project.id}: {str(e)}")
+        return None
+
+
+def _clone_github_repository(project):
+    """Clone a GitHub repository to a temporary directory"""
+    try:
+        import subprocess
+        
+        # Create temporary directory
+        temp_dir = tempfile.mkdtemp(prefix=f"repo_{project.id}_")
+        
+        # Extract repository information
+        parsed = urlparse(project.github_repo_url)
+        path_parts = parsed.path.strip('/').split('/')
+        owner, repo_name = path_parts[0], path_parts[1]
+        
+        # Clean repo name (remove .git suffix if present)
+        if repo_name.endswith('.git'):
+            repo_name = repo_name[:-4]
+        
+        clone_url = f"https://github.com/{owner}/{repo_name}.git"
+        target_dir = os.path.join(temp_dir, repo_name)
+        
+        logger.info(f"Cloning repository {clone_url} to {target_dir}")
+        
+        # Clone the repository with limited depth to save space and time
+        cmd = [
+            'git', 'clone',
+            '--depth', '1',  # Shallow clone
+            '--single-branch',  # Only default branch
+            clone_url,
+            target_dir
+        ]
+        
+        # Execute clone command with timeout
+        result = subprocess.run(
+            cmd,
+            timeout=300,  # 5 minute timeout
+            capture_output=True,
+            text=True,
+            cwd=temp_dir
+        )
+        
+        if result.returncode != 0:
+            logger.error(f"Git clone failed for {clone_url}: {result.stderr}")
+            return None
+        
+        # Verify the cloned directory exists and has content
+        if not os.path.exists(target_dir) or not os.listdir(target_dir):
+            logger.error(f"Cloned directory is empty or doesn't exist: {target_dir}")
+            return None
+        
+        logger.info(f"Successfully cloned repository to {target_dir}")
+        return target_dir
+        
+    except subprocess.TimeoutExpired:
+        logger.error(f"Git clone timeout for repository {project.github_repo_url}")
+        return None
+    except Exception as e:
+        logger.error(f"Error cloning repository {project.github_repo_url}: {str(e)}")
+        return None
 
 
 def _perform_mock_drive_upload(project, conversion_result):
