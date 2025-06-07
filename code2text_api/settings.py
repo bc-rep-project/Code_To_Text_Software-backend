@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 import pymongo
+from cryptography.fernet import Fernet
 
 # Load environment variables
 load_dotenv()
@@ -315,3 +316,33 @@ if not DEBUG:
 
 # Custom User Model
 AUTH_USER_MODEL = 'users.User'
+
+# Cache configuration for OTP storage
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',  # For development
+        'LOCATION': 'unique-snowflake',
+        # For production, use Redis:
+        # 'BACKEND': 'django_redis.cache.RedisCache',
+        # 'LOCATION': os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/1'),
+        # 'OPTIONS': {
+        #     'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+        # }
+    }
+}
+
+# Email configuration for OTP sending
+EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')  # For development
+
+# Email settings for production (configure these environment variables in production)
+if EMAIL_BACKEND == 'django.core.mail.backends.smtp.EmailBackend':
+    EMAIL_HOST = os.environ.get('EMAIL_HOST', 'smtp.gmail.com')
+    EMAIL_PORT = int(os.environ.get('EMAIL_PORT', '587'))
+    EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'True').lower() == 'true'
+    EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER')
+    EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD')
+
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'noreply@code2text.com')
+
+# Token encryption key for Google OAuth tokens
+TOKEN_ENCRYPTION_KEY = os.environ.get('TOKEN_ENCRYPTION_KEY', Fernet.generate_key().decode())

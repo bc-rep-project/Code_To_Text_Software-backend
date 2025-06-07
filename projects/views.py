@@ -5,6 +5,8 @@ import tempfile
 import zipfile
 import requests
 import logging
+import random
+import string
 from urllib.parse import urlparse
 from django.utils import timezone
 from django.http import HttpResponse, JsonResponse
@@ -12,11 +14,16 @@ from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth.decorators import login_required
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
+from django.core.cache import cache
+from django.core.mail import send_mail
+from django.conf import settings
+from django.shortcuts import get_object_or_404
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes, parser_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 # Add the import for our conversion utils
 from .conversion_utils import perform_codebase_conversion
@@ -332,61 +339,240 @@ def download_project(request, project_id):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def upload_to_drive(request, project_id):
-    """
-    Upload converted project to Google Drive
-    """
-    try:
-        project = Project.objects.get(id=project_id, user=request.user)
-    except Project.DoesNotExist:
-        return Response({
-            'error': 'Project not found'
-        }, status=status.HTTP_404_NOT_FOUND)
-    
-    # Check if project has been converted
-    if project.status != 'converted' and project.status != 'completed':
-        return Response({
-            'error': 'Project has not been converted yet'
-        }, status=status.HTTP_400_BAD_REQUEST)
-    
-    # Check if conversion result exists
-    try:
-        conversion_result = project.conversion_result
-    except ConversionResult.DoesNotExist:
-        return Response({
-            'error': 'No conversion result found'
-        }, status=status.HTTP_404_NOT_FOUND)
-    
-    # Check if already uploaded to drive
-    if conversion_result.google_drive_folder_id:
-        return Response({
-            'message': 'Project already uploaded to Google Drive',
-            'drive_folder_link': conversion_result.google_drive_folder_link
-        }, status=status.HTTP_200_OK)
-    
-    # Update project status
-    project.status = 'uploading_to_drive'
-    project.save()
-    
-    try:
-        # Here you would implement actual Google Drive upload
-        # For now, we'll simulate it
-        _perform_mock_drive_upload(project, conversion_result)
-        
-        return Response({
-            'message': 'Project uploaded to Google Drive successfully',
-            'drive_folder_link': conversion_result.google_drive_folder_link
-        }, status=status.HTTP_200_OK)
-        
-    except Exception as e:
-        project.status = 'converted'  # Revert status
-        project.save()
-        return Response({
-            'error': f'Failed to upload to Google Drive: {str(e)}'
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+def generate_otp(length=6):
+    """Generate a random OTP of specified length"""
+    return ''.join(random.choices(string.digits, k=length))
 
+def upload_to_google_drive_task(*args, **kwargs):
+    """
+    Placeholder for Celery task that handles actual Google Drive upload
+    In production, this would be implemented as a proper Celery task
+    """
+    print(f"CELERY TASK (Placeholder): upload_to_google_drive_task called with args: {args}, kwargs: {kwargs}")
+    
+    # Extract parameters
+    user_id = kwargs.get('user_id') or (args[0] if len(args) > 0 else None)
+    project_id = kwargs.get('project_id') or (args[1] if len(args) > 1 else None)
+    verified_email = kwargs.get('verified_email')
+    
+    if not project_id:
+        print("ERROR: No project_id provided to upload task")
+        return
+    
+    try:
+        project = Project.objects.get(id=project_id)
+        
+        # Simulate Google Drive upload process
+        print(f"Simulating Google Drive upload for project {project.project_name}")
+        
+        # Update project status
+        project.status = "uploading_to_drive"
+        project.save()
+        
+        # Simulate upload delay
+        import time
+        time.sleep(2)
+        
+        # Update conversion result with mock Google Drive data
+        conversion_result = project.conversion_result
+        conversion_result.google_drive_folder_id = f"mock_folder_{project_id}"
+        conversion_result.google_drive_folder_link = f"https://drive.google.com/drive/folders/mock_folder_{project_id}"
+        conversion_result.save()
+        
+        # Update project status to completed
+        project.status = "completed"
+        project.save()
+        
+        print(f"Project {project_id} Google Drive upload simulation completed")
+        
+    except Project.DoesNotExist:
+        print(f"ERROR: Project {project_id} not found")
+    except Exception as e:
+        print(f"ERROR in upload task: {str(e)}")
+        if project_id:
+            try:
+                project = Project.objects.get(id=project_id)
+                project.status = "converted"  # Revert to previous status
+                project.save()
+            except:
+                pass
+
+class ProjectUploadToDriveView(APIView):
+    """
+    Comprehensive Google Drive upload endpoint with OTP verification
+    Handles multiple authentication scenarios:
+    1. User already has Google tokens -> proceed with upload
+    2. User not authenticated -> prompt for email
+    3. User provides email -> send OTP
+    4. User provides OTP -> verify and proceed
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, project_id):
+        project = get_object_or_404(Project, id=project_id, user=request.user)
+        user = request.user
+
+        # Validate project status
+        if project.status != "converted" or \
+           not hasattr(project, 'conversion_result') or \
+           not project.conversion_result or \
+           not project.conversion_result.converted_artifact_path:
+            return Response(
+                {
+                    "success": False, 
+                    "message": "Project is not converted or converted artifact is missing.",
+                    "project_status": project.status
+                },
+                status=status.HTTP_409_CONFLICT
+            )
+
+        # Scenario 1: User is already authenticated with Google
+        google_access_token = user.get_google_access_token()
+        if google_access_token:
+            logger.info(f"User {user.id} has Google tokens, proceeding with upload")
+            
+            # Trigger upload task (in production, this would be Celery)
+            upload_to_google_drive_task(user_id=user.id, project_id=project.id)
+            
+            return Response(
+                {
+                    "success": True, 
+                    "message": "Upload to Google Drive initiated using existing Google authentication.",
+                    "status": "upload_started"
+                },
+                status=status.HTTP_202_ACCEPTED
+            )
+
+        # Scenarios 2, 3 & 4: OTP Flow
+        provided_email = request.data.get('email')
+        provided_otp = request.data.get('otp_code')
+        
+        otp_cache_key = f"gdrive_otp_for_user_{user.id}_project_{project.id}"
+        cached_otp_data = cache.get(otp_cache_key)
+
+        if provided_otp:
+            # Scenario 4: User provides OTP for verification
+            if not cached_otp_data:
+                return Response(
+                    {
+                        "success": False, 
+                        "message": "OTP expired or not found. Please restart the email verification.",
+                        "action_required": "provide_email"
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+                
+            if cached_otp_data.get('otp') == provided_otp:
+                # OTP verified successfully
+                cache.delete(otp_cache_key)  # Remove used OTP
+                
+                verified_email = cached_otp_data.get('email')
+                logger.info(f"OTP verified for user {user.id}, email: {verified_email}")
+                
+                # Store verified email temporarily (could be stored in user profile if needed)
+                # For now, we'll just acknowledge verification and expect Google auth
+                
+                return Response(
+                    {
+                        "success": True,
+                        "message": f"Email {verified_email} verified successfully. Please ensure you are authenticated with Google to complete the Drive upload.",
+                        "action_required": "ensure_google_auth_then_retry_upload",
+                        "verified_email": verified_email,
+                        "next_step": "Complete Google OAuth authentication to proceed with upload"
+                    },
+                    status=status.HTTP_200_OK
+                )
+            else:
+                return Response(
+                    {
+                        "success": False, 
+                        "message": "Invalid OTP. Please check the code and try again.",
+                        "action_required": "submit_otp"
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        elif provided_email:
+            # Scenario 3: User provides email, send OTP
+            # Basic email validation
+            if not provided_email or '@' not in provided_email:
+                return Response(
+                    {
+                        "success": False, 
+                        "message": "Invalid email format. Please provide a valid email address.",
+                        "action_required": "provide_email"
+                    }, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # Generate and cache OTP
+            otp = generate_otp()
+            new_otp_data = {"otp": otp, "email": provided_email}
+            cache.set(otp_cache_key, new_otp_data, timeout=300)  # OTP expires in 5 minutes
+
+            try:
+                # Send OTP email
+                subject = 'Your Google Drive Upload Verification Code'
+                message = f'''
+Hello,
+
+Your verification code for uploading project "{project.project_name}" to Google Drive is:
+
+{otp}
+
+This code expires in 5 minutes.
+
+If you didn't request this code, please ignore this email.
+
+Best regards,
+Code2Text Team
+                '''.strip()
+                
+                send_mail(
+                    subject=subject,
+                    message=message,
+                    from_email=settings.DEFAULT_FROM_EMAIL,
+                    recipient_list=[provided_email],
+                    fail_silently=False,
+                )
+                
+                logger.info(f"OTP sent to {provided_email} for user {user.id}, project {project.id}")
+                
+                return Response(
+                    {
+                        "success": True,
+                        "message": f"A verification code has been sent to {provided_email}. Please check your email and provide the code to continue.",
+                        "action_required": "submit_otp",
+                        "otp_expires_in": 300  # 5 minutes in seconds
+                    },
+                    status=status.HTTP_200_OK
+                )
+                
+            except Exception as e:
+                logger.error(f"Failed to send OTP email to {provided_email}: {str(e)}")
+                return Response(
+                    {
+                        "success": False, 
+                        "message": "Failed to send verification email. Please try again later or contact support.",
+                        "action_required": "provide_email"
+                    },
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+
+        else:
+            # Scenario 2: No Google auth, no email/OTP provided yet. Prompt for email.
+            return Response(
+                {
+                    "success": False,
+                    "message": "Google authentication is required for Drive upload. Please provide your Google email to receive a verification code.",
+                    "action_required": "provide_email",
+                    "help": "We'll send a verification code to your email to confirm your identity before Google authentication."
+                },
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+
+# Update the view mapping (replace the old upload_to_drive function)
+upload_to_drive = ProjectUploadToDriveView.as_view()
 
 # Helper functions
 
