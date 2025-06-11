@@ -21,7 +21,7 @@ from django.shortcuts import get_object_or_404
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes, parser_classes
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -29,7 +29,7 @@ from rest_framework.views import APIView
 from .conversion_utils import perform_codebase_conversion
 
 from .models import Project, ScanData, GitHubInfo, ConversionResult, ProjectMonitoring
-from .serializers import ProjectSerializer, ScanDataSerializer
+from .serializers import ProjectSerializer, ScanDataSerializer, ConversionResultSerializer
 
 # Google Drive integration
 from allauth.socialaccount.models import SocialToken
@@ -424,58 +424,44 @@ def upload_to_drive(request, project_id):
         }, status=status.HTTP_400_BAD_REQUEST)
     
     # Check if user has Google tokens
-    social_token = SocialToken.objects.filter(
-        account__user=request.user, 
-        account__provider='google'
-    ).first()
-    
-    if not social_token:
-        # User needs to authenticate with Google
-        google_auth_url = f"{request.build_absolute_uri('/accounts/google/login/')}?next=/api/projects/{project_id}/upload_to_drive/"
+    try:
+        social_token = SocialToken.objects.filter(
+            account__user=request.user, 
+            account__provider='google'
+        ).first()
+        
+        logger.info(f"Found social token: {bool(social_token)} for user {request.user.id}")
+        
+        if not social_token:
+            # User needs to authenticate with Google
+            google_auth_url = f"{request.build_absolute_uri('/accounts/google/login/')}?next={request.build_absolute_uri(request.path)}"
+            logger.info(f"Generated auth URL: {google_auth_url}")
+            return Response({
+                'action_required': 'GOOGLE_OAUTH_REQUIRED',
+                'message': 'Google authentication required',
+                'auth_url': google_auth_url
+            }, status=status.HTTP_200_OK)
+        
+        # Verify token is valid
+        if not social_token.token:
+            logger.warning("Social token exists but token field is empty")
+            # Delete invalid token and require re-auth
+            social_token.delete()
+            google_auth_url = f"{request.build_absolute_uri('/accounts/google/login/')}?next={request.build_absolute_uri(request.path)}"
+            return Response({
+                'action_required': 'GOOGLE_OAUTH_REQUIRED',
+                'message': 'Google authentication required (invalid token)',
+                'auth_url': google_auth_url
+            }, status=status.HTTP_200_OK)
+            
+    except Exception as e:
+        logger.error(f"Error checking social tokens: {str(e)}")
+        google_auth_url = f"{request.build_absolute_uri('/accounts/google/login/')}?next={request.build_absolute_uri(request.path)}"
         return Response({
             'action_required': 'GOOGLE_OAUTH_REQUIRED',
             'message': 'Google authentication required',
             'auth_url': google_auth_url
         }, status=status.HTTP_200_OK)
-    
-    try:
-        # Create credentials from stored tokens
-        credentials = Credentials(
-            token=social_token.token,
-            refresh_token=social_token.token_secret,
-            token_uri='https://oauth2.googleapis.com/token',
-            client_id=settings.GOOGLE_CLIENT_ID,
-            client_secret=settings.GOOGLE_CLIENT_SECRET
-        )
-        
-        # Refresh token if needed
-        if credentials.expired:
-            credentials.refresh(Request())
-            # Update stored token
-            social_token.token = credentials.token
-            social_token.save()
-        
-        # Upload to Google Drive
-        drive_folder_link = _upload_project_to_google_drive(project, credentials)
-        
-        # Update project with Google Drive info
-        conversion_result = ConversionResult.objects.filter(project=project).first()
-        if conversion_result:
-            conversion_result.google_drive_folder_link = drive_folder_link
-            conversion_result.google_drive_folder_id = drive_folder_link.split('/')[-1]
-            conversion_result.save()
-        
-        return Response({
-            'message': 'Project uploaded to Google Drive successfully',
-            'status': 'uploaded',
-            'drive_folder_link': drive_folder_link
-        }, status=status.HTTP_200_OK)
-        
-    except Exception as e:
-        logger.error(f"Google Drive upload error: {str(e)}")
-        return Response({
-            'error': f'Failed to upload to Google Drive: {str(e)}'
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 def _upload_project_to_google_drive(project, credentials):
@@ -935,3 +921,52 @@ def _perform_mock_drive_upload(project, conversion_result):
     # Update project status
     project.status = 'completed'
     project.save()
+
+    try:
+        # Create credentials from stored tokens
+        credentials = Credentials(
+            token=social_token.token,
+            refresh_token=social_token.token_secret,
+            token_uri='https://oauth2.googleapis.com/token',
+            client_id=settings.SOCIALACCOUNT_PROVIDERS['google']['APP']['client_id'],
+            client_secret=settings.SOCIALACCOUNT_PROVIDERS['google']['APP']['secret']
+        )
+        
+        logger.info(f"Created credentials for user {request.user.id}")
+        
+        # Refresh token if needed
+        if credentials.expired:
+            logger.info("Token expired, refreshing...")
+            credentials.refresh(Request())
+            # Update stored token
+            social_token.token = credentials.token
+            if credentials.refresh_token:
+                social_token.token_secret = credentials.refresh_token
+            social_token.save()
+            logger.info("Token refreshed and saved")
+        
+        # Upload to Google Drive
+        drive_folder_link = _upload_project_to_google_drive(project, credentials)
+        logger.info(f"Successfully uploaded project to Google Drive: {drive_folder_link}")
+        
+        # Update project with Google Drive info
+        conversion_result = ConversionResult.objects.filter(project=project).first()
+        if conversion_result:
+            conversion_result.google_drive_folder_link = drive_folder_link
+            conversion_result.google_drive_folder_id = drive_folder_link.split('/')[-1] if '/' in drive_folder_link else drive_folder_link
+            conversion_result.save()
+            logger.info("Updated conversion result with Google Drive info")
+        
+        return Response({
+            'message': 'Project uploaded to Google Drive successfully',
+            'status': 'uploaded',
+            'drive_folder_link': drive_folder_link,
+            'success': True
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        logger.error(f"Google Drive upload error: {str(e)}")
+        return Response({
+            'error': f'Failed to upload to Google Drive: {str(e)}',
+            'success': False
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
