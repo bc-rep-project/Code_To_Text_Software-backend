@@ -10,6 +10,7 @@ GitPython==3.1.40
 google-auth==2.25.0
 google-auth-oauthlib==1.1.0
 google-api-python-client==2.112.0
+google-auth-httplib2==0.2.0
 paypalrestsdk==1.13.1
 gunicorn==21.2.0
 PyJWT==2.8.0
@@ -20,4 +21,6 @@ whitenoise==6.6.0
 celery==5.3.4
 redis==5.0.1
 psycopg2-binary==2.9.9
-django-celery-beat==2.5.0 
+django-celery-beat==2.5.0
+django-allauth==0.57.0
+cryptography==41.0.7 
