@@ -31,6 +31,9 @@ urlpatterns = [
     path('api/projects/', include('projects.urls')),
     path('api/payments/', include('payments.urls')),
     path('api/webhooks/', include('webhooks.urls')),
+
+    # Django AllAuth URLs for Google OAuth
+    path('accounts/', include('allauth.urls')),
 ]
 
 # Serve media files in development

@@ -67,6 +67,13 @@ INSTALLED_APPS = [
     'corsheaders',
     'django_celery_beat',
     
+    # Django AllAuth for Google OAuth
+    'django.contrib.sites',
+    'allauth',
+    'allauth.account',
+    'allauth.socialaccount',
+    'allauth.socialaccount.providers.google',
+    
     # Local apps
     'users',
     'projects',
@@ -82,6 +89,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     # 'django.middleware.csrf.CsrfViewMiddleware',  # Temporarily disabled for API testing
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'allauth.account.middleware.AccountMiddleware',  # Required for AllAuth
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -346,3 +354,39 @@ DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'noreply@code2text.com
 
 # Token encryption key for Google OAuth tokens
 TOKEN_ENCRYPTION_KEY = os.environ.get('TOKEN_ENCRYPTION_KEY', Fernet.generate_key().decode())
+
+# Django AllAuth Configuration
+SITE_ID = 1
+
+# AllAuth settings (updated to use new format)
+ACCOUNT_EMAIL_VERIFICATION = 'none'
+ACCOUNT_LOGIN_METHODS = {'email'}
+ACCOUNT_SIGNUP_FIELDS = ['email*', 'password1*', 'password2*']
+
+# Social account providers
+SOCIALACCOUNT_PROVIDERS = {
+    'google': {
+        'APP': {
+            'client_id': os.environ.get('GOOGLE_CLIENT_ID'),
+            'secret': os.environ.get('GOOGLE_CLIENT_SECRET'),
+            'key': ''
+        },
+        'SCOPE': [
+            'profile',
+            'email',
+            'https://www.googleapis.com/auth/drive.file',
+        ],
+        'AUTH_PARAMS': {
+            'access_type': 'offline',  # Critical for refresh tokens
+            'prompt': 'consent'  # Force consent screen for testing
+        }
+    }
+}
+
+# Store tokens for API access
+SOCIALACCOUNT_STORE_TOKENS = True
+
+# REST Framework authentication classes
+REST_FRAMEWORK['DEFAULT_AUTHENTICATION_CLASSES'].extend([
+    'allauth.account.auth_backends.AuthenticationBackend',
+])

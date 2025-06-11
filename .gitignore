@@ -85,3 +85,11 @@ test_storage.py
 repos/
 converted/
 media/ 
+DEPLOYMENT_READY.md
+GOOGLE_DRIVE_INTEGRATION.md
+GOOGLE_OAUTH_IMPLEMENTATION.md
+IMPLEMENTATION_SUMMARY.md
+OAUTH_PLAYGROUND_TESTING.md
+test_google_oauth.py
+TOKEN_REFRESH_IMPLEMENTATION.md
+users/example_google_drive_views.py
