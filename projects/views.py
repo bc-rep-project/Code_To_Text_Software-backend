@@ -32,7 +32,7 @@ from .models import Project, ScanData, GitHubInfo, ConversionResult, ProjectMoni
 from .serializers import ProjectSerializer, ScanDataSerializer, ConversionResultSerializer
 
 # Google Drive integration
-from allauth.socialaccount.models import SocialToken
+from allauth.socialaccount.models import SocialToken, SocialAccount
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -417,98 +417,318 @@ def upload_to_drive(request, project_id):
             'error': 'Project not found'
         }, status=status.HTTP_404_NOT_FOUND)
     
-    # Check if project is converted
-    if project.status != 'converted':
+    # Check if project is converted or completed
+    if project.status not in ['converted', 'completed']:
         return Response({
-            'error': 'Project must be converted before uploading to Google Drive'
+            'error': f'Project must be converted or completed before uploading to Google Drive. Current status: {project.status}'
         }, status=status.HTTP_400_BAD_REQUEST)
     
-    # Check if user has Google tokens
     try:
-        social_token = SocialToken.objects.filter(
-            account__user=request.user, 
-            account__provider='google'
+        # Get user's Google social account and token
+        social_account = SocialAccount.objects.filter(
+            user=request.user, 
+            provider='google'
         ).first()
         
-        logger.info(f"Found social token: {bool(social_token)} for user {request.user.id}")
-        
-        if not social_token:
+        if not social_account:
             # User needs to authenticate with Google
-            google_auth_url = f"{request.build_absolute_uri('/accounts/google/login/')}?next={request.build_absolute_uri(request.path)}"
-            logger.info(f"Generated auth URL: {google_auth_url}")
+            google_auth_url = f"{request.build_absolute_uri('/accounts/google/login/')}"
             return Response({
                 'action_required': 'GOOGLE_OAUTH_REQUIRED',
-                'message': 'Google authentication required',
-                'auth_url': google_auth_url
+                'message': 'Please connect your Google account first',
+                'auth_url': google_auth_url,
+                'instructions': 'Click the auth_url to connect your Google account, then try uploading again'
             }, status=status.HTTP_200_OK)
         
-        # Verify token is valid
-        if not social_token.token:
-            logger.warning("Social token exists but token field is empty")
-            # Delete invalid token and require re-auth
-            social_token.delete()
-            google_auth_url = f"{request.build_absolute_uri('/accounts/google/login/')}?next={request.build_absolute_uri(request.path)}"
+        # Get the social token
+        social_token = SocialToken.objects.filter(
+            account=social_account
+        ).first()
+        
+        if not social_token or not social_token.token:
+            # Token doesn't exist or is invalid
+            google_auth_url = f"{request.build_absolute_uri('/accounts/google/login/')}"
             return Response({
-                'action_required': 'GOOGLE_OAUTH_REQUIRED',
-                'message': 'Google authentication required (invalid token)',
-                'auth_url': google_auth_url
+                'action_required': 'GOOGLE_OAUTH_REQUIRED', 
+                'message': 'Google authentication required - please reconnect your account',
+                'auth_url': google_auth_url,
+                'instructions': 'Your Google token is missing. Please reconnect your account.'
+            }, status=status.HTTP_200_OK)
+        
+        logger.info(f"Found Google token for user {request.user.id}")
+        
+        # Create credentials from the stored token
+        credentials = Credentials(
+            token=social_token.token,
+            refresh_token=getattr(social_token, 'token_secret', None),
+            token_uri='https://oauth2.googleapis.com/token',
+            client_id=getattr(settings, 'GOOGLE_CLIENT_ID', None),
+            client_secret=getattr(settings, 'GOOGLE_CLIENT_SECRET', None),
+            scopes=['https://www.googleapis.com/auth/drive.file']
+        )
+        
+        # Check if credentials are properly configured
+        if not credentials.client_id or not credentials.client_secret:
+            logger.error("Google OAuth credentials not configured in settings")
+            return Response({
+                'error': 'Google Drive integration is not properly configured on the server',
+                'debug_info': 'GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET not set in environment variables'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        # Refresh token if expired
+        if credentials.expired and credentials.refresh_token:
+            logger.info("Refreshing expired Google token")
+            try:
+                credentials.refresh(Request())
+                
+                # Update the stored token
+                social_token.token = credentials.token
+                if hasattr(credentials, 'refresh_token') and credentials.refresh_token:
+                    social_token.token_secret = credentials.refresh_token
+                social_token.save()
+                logger.info("Token refreshed and saved successfully")
+            except Exception as refresh_error:
+                logger.error(f"Token refresh failed: {refresh_error}")
+                # Delete invalid token and require re-auth
+                social_token.delete()
+                google_auth_url = f"{request.build_absolute_uri('/accounts/google/login/')}"
+                return Response({
+                    'action_required': 'GOOGLE_OAUTH_REQUIRED',
+                    'message': 'Google authentication expired - please reconnect your account',
+                    'auth_url': google_auth_url,
+                    'error_details': str(refresh_error)
+                }, status=status.HTTP_200_OK)
+        
+        # Upload to Google Drive
+        try:
+            folder_link = _upload_project_to_google_drive(project, credentials)
+            
+            # Update conversion result with Google Drive link
+            conversion_result = ConversionResult.objects.filter(project=project).first()
+            if conversion_result:
+                conversion_result.google_drive_folder_link = folder_link
+                conversion_result.google_drive_folder_id = folder_link.split('/')[-1] if '/' in folder_link else None
+                conversion_result.save()
+            
+            logger.info(f"Successfully uploaded project {project_id} to Google Drive")
+            
+            return Response({
+                'message': 'Project uploaded to Google Drive successfully',
+                'google_drive_link': folder_link,
+                'project_name': project.project_name,
+                'status': 'success'
             }, status=status.HTTP_200_OK)
             
+        except Exception as drive_error:
+            logger.error(f"Google Drive upload failed for project {project_id}: {str(drive_error)}")
+            
+            # Check if it's an authentication error
+            error_str = str(drive_error).lower()
+            if any(phrase in error_str for phrase in ['invalid_grant', 'unauthorized', 'authentication', 'token']):
+                # Delete invalid token and require re-auth
+                social_token.delete()
+                google_auth_url = f"{request.build_absolute_uri('/accounts/google/login/')}"
+                return Response({
+                    'action_required': 'GOOGLE_OAUTH_REQUIRED',
+                    'message': 'Google authentication expired - please reconnect your account',
+                    'auth_url': google_auth_url,
+                    'error_details': str(drive_error)
+                }, status=status.HTTP_200_OK)
+            
+            return Response({
+                'error': f'Failed to upload to Google Drive: {str(drive_error)}',
+                'error_type': 'DRIVE_UPLOAD_ERROR'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
     except Exception as e:
-        logger.error(f"Error checking social tokens: {str(e)}")
-        google_auth_url = f"{request.build_absolute_uri('/accounts/google/login/')}?next={request.build_absolute_uri(request.path)}"
+        logger.error(f"Unexpected error in upload_to_drive for project {project_id}: {str(e)}", exc_info=True)
         return Response({
-            'action_required': 'GOOGLE_OAUTH_REQUIRED',
-            'message': 'Google authentication required',
-            'auth_url': google_auth_url
-        }, status=status.HTTP_200_OK)
+            'error': f'An unexpected error occurred: {str(e)}',
+            'error_type': 'UNEXPECTED_ERROR'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 def _upload_project_to_google_drive(project, credentials):
     """
-    Actual Google Drive upload implementation
+    Actual Google Drive upload implementation with improved error handling
     """
     try:
         service = build('drive', 'v3', credentials=credentials)
+        logger.info(f"Starting Google Drive upload for project: {project.project_name}")
         
         # Create a folder for the project
         folder_metadata = {
             'name': f"Code2Text - {project.project_name}",
-            'mimeType': 'application/vnd.google-apps.folder'
+            'mimeType': 'application/vnd.google-apps.folder',
+            'description': f'Converted code project from Code2Text Software - {timezone.now().strftime("%Y-%m-%d %H:%M:%S")}'
         }
         
-        folder = service.files().create(body=folder_metadata, fields='id').execute()
+        logger.info("Creating folder on Google Drive...")
+        folder = service.files().create(body=folder_metadata, fields='id,webViewLink').execute()
         folder_id = folder.get('id')
+        folder_link = folder.get('webViewLink')
+        logger.info(f"Created folder with ID: {folder_id}")
         
         # Get the converted file to upload
         conversion_result = ConversionResult.objects.filter(project=project).first()
-        if conversion_result and conversion_result.output_file_key:
-            # Upload the converted file
-            file_content = default_storage.open(conversion_result.output_file_key).read()
+        
+        if not conversion_result:
+            raise Exception("No conversion result found for this project")
+        
+        # Check for converted file - use the correct field name
+        converted_file_path = conversion_result.converted_artifact_path
+        
+        if not converted_file_path:
+            raise Exception("No converted file path found in conversion result")
+        
+        # Check if it's a file path or storage key
+        if converted_file_path.startswith('/') or os.path.exists(converted_file_path):
+            # It's a local file path
+            if not os.path.exists(converted_file_path):
+                raise Exception(f"Converted file not found at path: {converted_file_path}")
             
-            file_metadata = {
-                'name': f"{project.project_name}_converted.txt",
-                'parents': [folder_id]
+            logger.info(f"Uploading local file: {converted_file_path}")
+            
+            # Upload the converted file from local path
+            try:
+                with open(converted_file_path, 'rb') as file_content:
+                    file_data = file_content.read()
+                    
+                    # Determine file name and mimetype
+                    file_name = f"{project.project_name}_converted.zip"
+                    mimetype = 'application/zip'
+                    
+                    # Check if it's a text file
+                    if converted_file_path.endswith('.txt'):
+                        file_name = f"{project.project_name}_converted.txt"
+                        mimetype = 'text/plain'
+                    
+                    file_metadata = {
+                        'name': file_name,
+                        'parents': [folder_id],
+                        'description': f'Converted code from {project.project_name} project'
+                    }
+                    
+                    from googleapiclient.http import MediaInMemoryUpload
+                    media = MediaInMemoryUpload(
+                        file_data, 
+                        mimetype=mimetype,
+                        resumable=True
+                    )
+                    
+                    uploaded_file = service.files().create(
+                        body=file_metadata,
+                        media_body=media,
+                        fields='id,name,size,webViewLink'
+                    ).execute()
+                    
+                    file_id = uploaded_file.get('id')
+                    file_link = uploaded_file.get('webViewLink')
+                    file_size = uploaded_file.get('size', 0)
+                    
+                    logger.info(f"Successfully uploaded file {file_id} ({file_size} bytes)")
+                    
+            except Exception as file_error:
+                logger.error(f"Error uploading file from local path: {file_error}")
+                # Clean up the folder if file upload failed
+                try:
+                    service.files().delete(fileId=folder_id).execute()
+                    logger.info("Cleaned up folder after file upload failure")
+                except:
+                    pass
+                raise Exception(f"File upload failed: {file_error}")
+        
+        else:
+            # It's a storage key - use Django storage
+            if not default_storage.exists(converted_file_path):
+                raise Exception(f"Converted file not found in storage: {converted_file_path}")
+            
+            logger.info(f"Uploading file from storage: {converted_file_path}")
+            
+            try:
+                with default_storage.open(converted_file_path, 'rb') as file_content:
+                    file_data = file_content.read()
+                    
+                    file_metadata = {
+                        'name': f"{project.project_name}_converted.txt",
+                        'parents': [folder_id],
+                        'description': f'Converted code from {project.project_name} project'
+                    }
+                    
+                    from googleapiclient.http import MediaInMemoryUpload
+                    media = MediaInMemoryUpload(
+                        file_data, 
+                        mimetype='text/plain',
+                        resumable=True
+                    )
+                    
+                    uploaded_file = service.files().create(
+                        body=file_metadata,
+                        media_body=media,
+                        fields='id,name,size,webViewLink'
+                    ).execute()
+                    
+                    file_id = uploaded_file.get('id')
+                    file_link = uploaded_file.get('webViewLink')
+                    file_size = uploaded_file.get('size', 0)
+                    
+                    logger.info(f"Successfully uploaded file {file_id} ({file_size} bytes)")
+                    
+            except Exception as file_error:
+                logger.error(f"Error uploading file from storage: {file_error}")
+                # Clean up the folder if file upload failed
+                try:
+                    service.files().delete(fileId=folder_id).execute()
+                    logger.info("Cleaned up folder after file upload failure")
+                except:
+                    pass
+                raise Exception(f"File upload failed: {file_error}")
+        
+        # Make the folder and file shareable (anyone with link can view)
+        try:
+            permission = {
+                'role': 'reader',
+                'type': 'anyone'
             }
             
-            from googleapiclient.http import MediaInMemoryUpload
-            media = MediaInMemoryUpload(file_content, mimetype='text/plain')
-            
-            uploaded_file = service.files().create(
-                body=file_metadata,
-                media_body=media,
+            # Share the folder
+            service.permissions().create(
+                fileId=folder_id,
+                body=permission,
                 fields='id'
             ).execute()
             
-            logger.info(f"Uploaded file {uploaded_file.get('id')} to Google Drive")
+            # Share the file
+            service.permissions().create(
+                fileId=file_id,
+                body=permission,
+                fields='id'
+            ).execute()
+            
+            logger.info("Set sharing permissions for folder and file")
+            
+        except Exception as perm_error:
+            logger.warning(f"Could not set sharing permissions: {perm_error}")
+            # Continue without sharing permissions
         
         # Return the shareable folder link
-        folder_link = f"https://drive.google.com/drive/folders/{folder_id}"
         return folder_link
         
     except HttpError as error:
-        logger.error(f"Google Drive API error: {error}")
-        raise Exception(f"Google Drive API error: {error}")
+        logger.error(f"Google Drive API HTTP error: {error}")
+        error_details = error.error_details if hasattr(error, 'error_details') else []
+        
+        if error.resp.status == 401:
+            raise Exception("Authentication failed - token may be expired")
+        elif error.resp.status == 403:
+            raise Exception("Permission denied - check your Google Drive API quotas and permissions")
+        elif error.resp.status == 404:
+            raise Exception("Google Drive API endpoint not found")
+        elif error.resp.status == 429:
+            raise Exception("Rate limit exceeded - please try again later")
+        else:
+            raise Exception(f"Google Drive API error (HTTP {error.resp.status}): {error}")
+            
     except Exception as error:
         logger.error(f"Google Drive upload error: {error}")
         raise Exception(f"Upload failed: {error}")
